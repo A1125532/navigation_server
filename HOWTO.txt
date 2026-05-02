@@ -1,0 +1,27 @@
+與 CXRMSamples 分開使用：此資料夾可整份複製移出 repo。
+
+雲端部署：請另讀同目錄 DEPLOY_CLOUD.txt（Railway / Render / Cloud Run）。
+
+一、設定 API（與舊 Pi 專案一致）
+  1) 複製 config.example.env 為同目錄的 .env 或 config.env（兩者皆可，勿提交 Git）
+  2) 編輯該檔填入：
+     - OPENAI_API_KEY   → Whisper 辨識 + GPT 意圖／聊天
+     - GOOGLE_MAPS_API_KEY → 路線、地理編碼、附近搜尋（需在 Google Cloud 啟用 Directions、Geocoding、Places）
+  3) 勿將 .env 提交到 Git
+
+二、安裝與啟動
+  python -m venv .venv
+  Windows: .venv\Scripts\activate
+  pip install -r requirements.txt
+  uvicorn app.main:app --host 0.0.0.0 --port 8765
+  （0.0.0.0 僅供伺服器監聽；本機瀏覽器請開 http://127.0.0.1:8765/ 或 http://localhost:8765/，勿用 0.0.0.0，否則會 ERR_ADDRESS_INVALID）
+
+三、檢查金鑰是否被讀到（不會回傳金鑰內容）
+  瀏覽器開 http://127.0.0.1:8765/config-status
+
+四、手機 App 後端網址
+  http://你的電腦區網IP:8765/
+
+五、起點 GPS
+  CXRMSamples Navigation 頁在連真實後端時，會自動附帶手機 origin（緯度,經度）給 /ai。
+  請允許「定位」權限；未傳時伺服器仍會嘗試用出口 IP 粗估（僅備援，誤差大）。
