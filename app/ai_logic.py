@@ -191,14 +191,18 @@ def handle_ai(payload: dict[str, Any]) -> dict[str, Any]:
             err = steps[0] if steps else "無法取得路線。"
             return {"reply": err, "intent": "navigate", "origin_used": origin}
 
+        duration_text = leg.get("duration", {}).get("text", "").strip()
+        distance_line = f"全程約 {leg['distance']['text']}"
+        if duration_text:
+            distance_line += f"，大約要走 {duration_text}"
         parts: list[str] = [
-            f"開始導航到「{destination}」。從 {leg['start_address']} 出發，全程約 {leg['distance']['text']}。"
+            f"開始導航到「{destination}」。從 {leg['start_address']} 出發，{distance_line}。",
         ]
         for i, step in enumerate(steps[:2], start=1):
             parts.append(f"第 {i} 步：{step['text']}，約 {step['distance']}。")
         if len(steps) > 2:
             parts.append("更多轉彎請再問「下一步」或繼續對話。")
-        return {"reply": "".join(parts), "intent": "navigate", "origin_used": origin}
+        return {"reply": "\n".join(parts), "intent": "navigate", "origin_used": origin}
 
     # 搜尋附近
     if intent == "search":
