@@ -293,8 +293,19 @@ def run_yolo_inference(image_bytes: bytes) -> list[dict[str, Any]]:
     if frame is None:
         return []
 
+    # 縮小影像以加快雲端 CPU 推理，降低 WebSocket 逾時斷線
+    h, w = frame.shape[:2]
+    max_side = 480
+    if max(h, w) > max_side:
+        scale = max_side / float(max(h, w))
+        frame = cv2.resize(
+            frame,
+            (max(1, int(w * scale)), max(1, int(h * scale))),
+            interpolation=cv2.INTER_AREA,
+        )
+
     model = _get_yolo_model()
-    results = model(frame, verbose=False)
+    results = model(frame, verbose=False, imgsz=320)
     detections: list[dict[str, Any]] = []
     for r in results:
         for box in r.boxes:

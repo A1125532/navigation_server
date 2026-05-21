@@ -132,12 +132,21 @@ async def video_stream(websocket: WebSocket) -> None:
         await websocket.send_json({"objects": [], "error": "yolo_disabled"})
         await websocket.close()
         return
+    infer_timeout = 45.0
     try:
         while True:
             data = await websocket.receive_bytes()
             try:
-                results = await asyncio.to_thread(run_yolo_inference, data)
+                results = await asyncio.wait_for(
+                    asyncio.to_thread(run_yolo_inference, data),
+                    timeout=infer_timeout,
+                )
                 await websocket.send_json({"objects": results})
+            except asyncio.TimeoutError:
+                logger.warning("YOLO inference timeout (%.0fs)", infer_timeout)
+                await websocket.send_json(
+                    {"objects": [], "error": "inference_timeout"}
+                )
             except Exception as e:  # noqa: BLE001
                 logger.exception("YOLO inference failed")
                 await websocket.send_json({"objects": [], "error": str(e)})
