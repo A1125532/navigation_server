@@ -1,0 +1,46 @@
+雲端部署（導航 + YOLO 同一台，戶外僅需手機+眼鏡+行動網路）
+================================================================
+
+一、Render（你目前使用的 navigation-server-mroz.onrender.com）
+
+1) 在 Render Dashboard 建立 Web Service
+   - Root Directory：navigation-server
+   - Runtime：Docker（使用本目錄 Dockerfile）
+   - 或 Native：Build = pip install -r requirements.txt && python -c "from ultralytics import YOLO; YOLO('yolov8n.pt')"
+             Start = uvicorn app.main:app --host 0.0.0.0 --port $PORT
+
+2) Environment Variables（與導航相同，再加 YOLO）：
+   OPENAI_API_KEY=...
+   GOOGLE_MAPS_API_KEY=...
+   YOLO_ENABLED=true
+   YOLO_MODEL=yolov8n.pt
+
+3) 建議方案
+   - 免費方案：YOLO 可能記憶體不足或很慢，僅適合測試
+   - Starter 以上（≥512MB～1GB RAM）：較適合即時 YOLO
+
+4) 部署完成後檢查
+   https://你的網域/config-status
+   → yolo.enabled=true, yolo.loaded=true
+
+5) Android App（CONSTANT.kt）
+   NAVIGATION_API_BASE_URL = https://你的網域
+   → 導航走 /transcribe、/ai
+   → Live Video YOLO 自動走 wss://你的網域/ws/video
+
+二、不必再開「本地伺服器」
+
+戶外使用時，手機透過 4G/5G 連雲端即可；不需要家裡電腦跑 uvicorn。
+
+三、本機開發（可選）
+
+  cd navigation-server
+  pip install -r requirements.txt
+  uvicorn app.main:app --host 0.0.0.0 --port 8765
+
+  App 暫改 NAVIGATION_API_BASE_URL = http://電腦區網IP:8765
+
+四、關閉 YOLO（僅要導航時）
+
+  雲端環境變數設 YOLO_ENABLED=false
+  導航不受影響；/ws/video 會回傳 yolo_disabled。

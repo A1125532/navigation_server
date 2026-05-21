@@ -10,7 +10,13 @@ from typing import Any, Optional
 
 from openai import OpenAI
 
-from app.config import google_maps_api_key, openai_api_key, openai_chat_model
+from app.config import (
+    google_maps_api_key,
+    openai_api_key,
+    openai_chat_model,
+    yolo_enabled,
+    yolo_model_path,
+)
 from app.maps_utils import (
     find_nearby_places,
     get_directions_stepwise,
@@ -94,7 +100,7 @@ def _resolve_origin(origin_from_phone: Optional[str]) -> tuple[Optional[float], 
 def handle_ai(payload: dict[str, Any]) -> dict[str, Any]:
     text, current_dest, origin_phone, conv_hist = _extract_payload(payload)
     if not text:
-        return {"reply": "我沒有聽清楚，你可以再說一次嗎？", "intent": "chat"}
+        return {"reply": "辨識不清或環境過於嘈雜，請再說一次。", "intent": "chat"}
 
     clean = _clean(text)
     bye_kw = ["結束導航", "结束导航", "再見", "再见", "結束", "结束", "掰掰"]
@@ -186,7 +192,7 @@ def handle_ai(payload: dict[str, Any]) -> dict[str, Any]:
             return {"reply": err, "intent": "navigate", "origin_used": origin}
 
         parts: list[str] = [
-            f"好的，開始導航到「{destination}」。從 {leg['start_address']} 出發，全程約 {leg['distance']['text']}。"
+            f"開始導航到「{destination}」。從 {leg['start_address']} 出發，全程約 {leg['distance']['text']}。"
         ]
         for i, step in enumerate(steps[:2], start=1):
             parts.append(f"第 {i} 步：{step['text']}，約 {step['distance']}。")
@@ -230,3 +236,80 @@ def handle_ai(payload: dict[str, Any]) -> dict[str, Any]:
     )
     reply = (r.choices[0].message.content or "").strip() or "（無回覆）"
     return {"reply": reply, "intent": "chat"}
+
+
+_yolo_model = None
+_yolo_load_error: str | None = None
+
+
+def _get_yolo_model():
+    global _yolo_model, _yolo_load_error
+    if _yolo_model is not None:
+        return _yolo_model
+    if _yolo_load_error is not None:
+        raise RuntimeError(_yolo_load_error)
+    try:
+        from ultralytics import YOLO
+
+        _yolo_model = YOLO(yolo_model_path())
+        return _yolo_model
+    except Exception as e:  # noqa: BLE001
+        _yolo_load_error = str(e)
+        raise
+
+
+def warmup_yolo_model() -> dict[str, Any]:
+    """啟動時預載模型（雲端部署建議在 lifespan 呼叫）。"""
+    if not yolo_enabled():
+        return {"enabled": False, "loaded": False}
+    try:
+        _get_yolo_model()
+        return {"enabled": True, "loaded": True, "model": yolo_model_path()}
+    except Exception as e:  # noqa: BLE001
+        return {"enabled": True, "loaded": False, "error": str(e), "model": yolo_model_path()}
+
+
+def yolo_status() -> dict[str, Any]:
+    if not yolo_enabled():
+        return {"enabled": False, "loaded": False}
+    return {
+        "enabled": True,
+        "loaded": _yolo_model is not None,
+        "model": yolo_model_path(),
+        "error": _yolo_load_error,
+    }
+
+
+def run_yolo_inference(image_bytes: bytes) -> list[dict[str, Any]]:
+    """將 JPEG 位元組解碼後執行 YOLOv8n，回傳偵測框列表。"""
+    if not yolo_enabled():
+        return []
+
+    import cv2
+    import numpy as np
+
+    nparr = np.frombuffer(image_bytes, np.uint8)
+    frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+    if frame is None:
+        return []
+
+    model = _get_yolo_model()
+    results = model(frame, verbose=False)
+    detections: list[dict[str, Any]] = []
+    for r in results:
+        for box in r.boxes:
+            x1, y1, x2, y2 = box.xyxy[0].tolist()
+            conf = float(box.conf[0])
+            cls = int(box.cls[0])
+            label = model.names[cls]
+            detections.append(
+                {
+                    "label": label,
+                    "confidence": conf,
+                    "x1": x1,
+                    "y1": y1,
+                    "x2": x2,
+                    "y2": y2,
+                }
+            )
+    return detections

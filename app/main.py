@@ -12,16 +12,31 @@ from __future__ import annotations
 
 import asyncio
 import io
+import logging
+from contextlib import asynccontextmanager
 from typing import Any, Optional
 
-from fastapi import Body, FastAPI, File, UploadFile
+from fastapi import Body, FastAPI, File, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
 import app.config  # noqa: F401 — 載入 .env
-from app.ai_logic import handle_ai
-from app.config import openai_api_key
+from app.ai_logic import handle_ai, run_yolo_inference, warmup_yolo_model, yolo_status
+from app.config import openai_api_key, yolo_enabled
+from app.transcribe_sanity import is_unreliable_transcription
 
-app = FastAPI(title="Navigation Pi Backend", version="0.2.0")
+logger = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """雲端啟動時預載 YOLO，避免第一幀 WebSocket 才下載模型。"""
+    if yolo_enabled():
+        info = await asyncio.to_thread(warmup_yolo_model)
+        logger.info("YOLO warmup: %s", info)
+    yield
+
+
+app = FastAPI(title="Navigation Pi Backend", version="0.3.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -44,6 +59,7 @@ async def root() -> dict[str, Any]:
             "config_status": "GET /config-status",
             "transcribe": "POST /transcribe",
             "ai": "POST /ai",
+            "video_ws": "WS /ws/video",
         },
     }
 
@@ -72,8 +88,11 @@ async def transcribe(file: UploadFile = File(...)) -> dict[str, Optional[str]]:
                 model="whisper-1",
                 file=bio,
                 language="zh",
+                prompt="語音導航：使用者說出目的地或導航指令，例如帶我去台中車站、開始導航。",
             )
             t = (getattr(result, "text", None) or "").strip()
+            if t and is_unreliable_transcription(t):
+                return {"text": "", "error": "unreliable_transcription"}
             return {"text": t, "error": None if t else "empty_transcription"}
         except Exception as e:  # noqa: BLE001
             return {"text": "", "error": str(e)}
@@ -99,5 +118,28 @@ async def config_status() -> dict[str, Any]:
     return {
         "openai_configured": bool(openai_api_key()),
         "google_maps_configured": bool(google_maps_api_key()),
+        "yolo": yolo_status(),
+        "video_ws": "wss://<your-host>/ws/video" if yolo_enabled() else None,
         "env_file_hint": "navigation-server/.env（可從 config.example.env 複製）",
     }
+
+
+@app.websocket("/ws/video")
+async def video_stream(websocket: WebSocket) -> None:
+    """接收眼鏡 Live Video 送來的 JPEG 幀，回傳 YOLO 偵測結果（與導航同一雲端主機）。"""
+    await websocket.accept()
+    if not yolo_enabled():
+        await websocket.send_json({"objects": [], "error": "yolo_disabled"})
+        await websocket.close()
+        return
+    try:
+        while True:
+            data = await websocket.receive_bytes()
+            try:
+                results = await asyncio.to_thread(run_yolo_inference, data)
+                await websocket.send_json({"objects": results})
+            except Exception as e:  # noqa: BLE001
+                logger.exception("YOLO inference failed")
+                await websocket.send_json({"objects": [], "error": str(e)})
+    except WebSocketDisconnect:
+        pass

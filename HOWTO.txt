@@ -1,6 +1,7 @@
 與 CXRMSamples 分開使用：此資料夾可整份複製移出 repo。
 
-雲端部署：請另讀同目錄 DEPLOY_CLOUD.txt（Railway / Render / Cloud Run）。
+雲端部署（導航 + YOLO 同一台）：請讀 DEPLOY_CLOUD.txt。
+戶外僅需手機+眼鏡；App 的 NAVIGATION_API_BASE_URL 指向雲端即可，不必開本地伺服器。
 
 一、設定 API（與舊 Pi 專案一致）
   1) 複製 config.example.env 為同目錄的 .env 或 config.env（兩者皆可，勿提交 Git）

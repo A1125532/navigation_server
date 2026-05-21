@@ -1,0 +1,18 @@
+# Render 一鍵部署（Root Directory 請設為 navigation-server）
+# 導航 /transcribe、/ai 與 YOLO /ws/video 同一服務，戶外只需手機+眼鏡+4G。
+services:
+  - type: web
+    name: navigation-server
+    runtime: docker
+    plan: starter
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /health
+    envVars:
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: GOOGLE_MAPS_API_KEY
+        sync: false
+      - key: YOLO_ENABLED
+        value: "true"
+      - key: YOLO_MODEL
+        value: yolov8n.pt

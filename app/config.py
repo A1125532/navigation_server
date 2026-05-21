@@ -33,3 +33,13 @@ def google_maps_api_key() -> str | None:
 
 def openai_chat_model() -> str:
     return (os.environ.get("OPENAI_CHAT_MODEL") or "gpt-4o-mini").strip()
+
+
+def yolo_enabled() -> bool:
+    """是否啟用 YOLO 即時辨識（WS /ws/video）。雲端與本機皆預設開啟。"""
+    v = (os.environ.get("YOLO_ENABLED") or "true").strip().lower()
+    return v not in ("0", "false", "no", "off")
+
+
+def yolo_model_path() -> str:
+    return (os.environ.get("YOLO_MODEL") or "yolov8n.pt").strip()
