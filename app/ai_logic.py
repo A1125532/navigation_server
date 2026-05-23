@@ -317,6 +317,14 @@ def run_yolo_inference(image_bytes: bytes) -> list[dict[str, Any]]:
             conf = float(box.conf[0])
             cls = int(box.cls[0])
             label = model.names[cls]
+            # 當偵測到特定物體且信心度高於 40% 時，觸發語音命令
+            if conf >= 0.4:
+                if label == "person":
+                    voice_cmd = "speak_person"
+                elif label == "laptop":
+                    voice_cmd = "speak_laptop"
+                elif label == "cup":
+                    voice_cmd = "speak_cup"
             detections.append(
                 {
                     "label": label,
@@ -327,4 +335,7 @@ def run_yolo_inference(image_bytes: bytes) -> list[dict[str, Any]]:
                     "y2": y2,
                 }
             )
-    return detections
+    return {
+        "objects": detections,
+        "voice_cmd": voice_cmd
+    }
