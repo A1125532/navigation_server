@@ -284,10 +284,13 @@ def yolo_status() -> dict[str, Any]:
     }
 
 
-def run_yolo_inference(image_bytes: bytes) -> list[dict[str, Any]]:
-    """將 JPEG 位元組解碼後執行 YOLOv8n，回傳偵測框列表。"""
+def run_yolo_inference(image_bytes: bytes) -> dict[str, Any]:
+    """將 JPEG 位元組解碼後執行 YOLOv8n，回傳包含偵測框與語音指令的字典。"""
+    # 確保不管發生什麼事，最少都會回傳預設值，不會引發 NameError
+    default_reply = {"objects": [], "voice_cmd": None}
+    
     if not yolo_enabled():
-        return []
+        return default_reply
 
     import cv2
     import numpy as np
@@ -295,7 +298,7 @@ def run_yolo_inference(image_bytes: bytes) -> list[dict[str, Any]]:
     nparr = np.frombuffer(image_bytes, np.uint8)
     frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
     if frame is None:
-        return []
+        return default_reply
 
     # 縮小影像以加快雲端 CPU 推理，降低 WebSocket 逾時斷線
     h, w = frame.shape[:2]
@@ -310,13 +313,17 @@ def run_yolo_inference(image_bytes: bytes) -> list[dict[str, Any]]:
 
     model = _get_yolo_model()
     results = model(frame, verbose=False, imgsz=320)
+    
     detections: list[dict[str, Any]] = []
+    voice_cmd = None  # ★ 關鍵：先初始化為 None，避免 NameError 崩潰
+
     for r in results:
         for box in r.boxes:
             x1, y1, x2, y2 = box.xyxy[0].tolist()
             conf = float(box.conf[0])
             cls = int(box.cls[0])
             label = model.names[cls]
+            
             # 當偵測到特定物體且信心度高於 40% 時，觸發語音命令
             if conf >= 0.4:
                 if label == "person":
@@ -325,6 +332,7 @@ def run_yolo_inference(image_bytes: bytes) -> list[dict[str, Any]]:
                     voice_cmd = "speak_laptop"
                 elif label == "cup":
                     voice_cmd = "speak_cup"
+                    
             detections.append(
                 {
                     "label": label,
@@ -335,6 +343,7 @@ def run_yolo_inference(image_bytes: bytes) -> list[dict[str, Any]]:
                     "y2": y2,
                 }
             )
+            
     return {
         "objects": detections,
         "voice_cmd": voice_cmd
