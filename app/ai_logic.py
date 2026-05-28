@@ -11,6 +11,7 @@ from typing import Any, Optional
 from openai import OpenAI
 
 from app.config import (
+    firebase_project_id,
     google_maps_api_key,
     openai_api_key,
     openai_chat_model,
@@ -120,6 +121,7 @@ def handle_ai(payload: dict[str, Any]) -> dict[str, Any]:
 
     client = OpenAI(api_key=key)
     maps_ok = bool(google_maps_api_key())
+    safe_route_ok = bool(firebase_project_id())
 
     # 導航中：問剩餘時間／距離
     remaining_kw = [
@@ -139,11 +141,11 @@ def handle_ai(payload: dict[str, Any]) -> dict[str, Any]:
                 "reply": "無法取得你的位置（請在手機傳 origin=緯度,經度，或檢查伺服器網路以使用 IP 粗估）。",
                 "intent": "navigate",
             }
-        if maps_ok:
+        if safe_route_ok:
             summary = get_directions_summary(origin_str or f"{lat},{lng}", current_dest, mode="walking")
             return {"reply": summary, "intent": "navigate", "origin_used": origin_str or f"{lat},{lng}"}
         return {
-            "reply": "已記錄你的問題，但尚未設定 GOOGLE_MAPS_API_KEY，無法計算距離與時間。",
+            "reply": "尚未設定 Firebase 路網資料，無法計算安全路線。",
             "intent": "navigate",
         }
 
@@ -164,10 +166,10 @@ def handle_ai(payload: dict[str, Any]) -> dict[str, Any]:
             }
 
         lat, lng, origin_str = _resolve_origin(origin_phone)
-        if lat is None or not maps_ok:
+        if lat is None or not safe_route_ok:
             msg = (
-                "無法取得起點座標或尚未設定 Google Maps API。"
-                "請在 .env 設定 GOOGLE_MAPS_API_KEY，並讓手機在呼叫 /ai 時帶入 origin（「緯度,經度」）。"
+                "無法取得起點座標或尚未設定 Firebase 路網資料。"
+                "請在 .env 設定 FIREBASE_PROJECT_ID，並讓手機在呼叫 /ai 時帶入 origin（「緯度,經度」）。"
             )
             if key:
                 r2 = client.chat.completions.create(
@@ -284,10 +286,13 @@ def yolo_status() -> dict[str, Any]:
     }
 
 
-def run_yolo_inference(image_bytes: bytes) -> list[dict[str, Any]]:
-    """將 JPEG 位元組解碼後執行 YOLOv8n，回傳偵測框列表。"""
+def run_yolo_inference(image_bytes: bytes) -> dict[str, Any]:
+    """將 JPEG 位元組解碼後執行 YOLOv8n，回傳包含偵測框與語音指令的字典。"""
+    # 確保不管發生什麼事，最少都會回傳預設值，不會引發 NameError
+    default_reply = {"objects": [], "voice_cmd": None}
+    
     if not yolo_enabled():
-        return []
+        return default_reply
 
     import cv2
     import numpy as np
@@ -295,7 +300,7 @@ def run_yolo_inference(image_bytes: bytes) -> list[dict[str, Any]]:
     nparr = np.frombuffer(image_bytes, np.uint8)
     frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
     if frame is None:
-        return []
+        return default_reply
 
     # 縮小影像以加快雲端 CPU 推理，降低 WebSocket 逾時斷線
     h, w = frame.shape[:2]
@@ -310,13 +315,26 @@ def run_yolo_inference(image_bytes: bytes) -> list[dict[str, Any]]:
 
     model = _get_yolo_model()
     results = model(frame, verbose=False, imgsz=320)
+    
     detections: list[dict[str, Any]] = []
+    voice_cmd = None  # ★ 關鍵：先初始化為 None，避免 NameError 崩潰
+
     for r in results:
         for box in r.boxes:
             x1, y1, x2, y2 = box.xyxy[0].tolist()
             conf = float(box.conf[0])
             cls = int(box.cls[0])
             label = model.names[cls]
+            
+            # 當偵測到特定物體且信心度高於 40% 時，觸發語音命令
+            if conf >= 0.4:
+                if label == "person":
+                    voice_cmd = "speak_person"
+                elif label == "laptop":
+                    voice_cmd = "speak_laptop"
+                elif label == "cup":
+                    voice_cmd = "speak_cup"
+                    
             detections.append(
                 {
                     "label": label,
@@ -327,4 +345,8 @@ def run_yolo_inference(image_bytes: bytes) -> list[dict[str, Any]]:
                     "y2": y2,
                 }
             )
-    return detections
+            
+    return {
+        "objects": detections,
+        "voice_cmd": voice_cmd
+    }

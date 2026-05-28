@@ -31,6 +31,47 @@ def google_maps_api_key() -> str | None:
     return k or None
 
 
+def firebase_project_id() -> str | None:
+    k = (os.environ.get("FIREBASE_PROJECT_ID") or "").strip()
+    return k or None
+
+
+def firebase_api_key() -> str | None:
+    k = (os.environ.get("FIREBASE_API_KEY") or "").strip()
+    return k or None
+
+
+def firebase_nodes_collection() -> str:
+    return (os.environ.get("FIREBASE_NODES_COLLECTION") or "safe_places").strip()
+
+
+def firebase_edges_collection() -> str:
+    return (os.environ.get("FIREBASE_EDGES_COLLECTION") or "nuk_edges_new").strip()
+
+
+def firebase_environment_collections() -> list[str]:
+    raw = (os.environ.get("FIREBASE_ENVIRONMENT_COLLECTIONS") or "safe_places,nuk").strip()
+    return [item.strip() for item in raw.split(",") if item.strip()]
+
+
+def local_nodes_path() -> Path:
+    raw = (os.environ.get("LOCAL_NODES_PATH") or "data/nuk_nodes_new.json").strip()
+    path = Path(raw)
+    return path if path.is_absolute() else _ROOT / path
+
+
+def local_edges_path() -> Path:
+    raw = (os.environ.get("LOCAL_EDGES_PATH") or "data/nuk_edges_new.json").strip()
+    path = Path(raw)
+    return path if path.is_absolute() else _ROOT / path
+
+
+def local_environment_points_path() -> Path:
+    raw = (os.environ.get("LOCAL_ENVIRONMENT_POINTS_PATH") or "data/environment_points.json").strip()
+    path = Path(raw)
+    return path if path.is_absolute() else _ROOT / path
+
+
 def openai_chat_model() -> str:
     return (os.environ.get("OPENAI_CHAT_MODEL") or "gpt-4o-mini").strip()
 
