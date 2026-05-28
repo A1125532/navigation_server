@@ -113,11 +113,14 @@ async def health() -> dict[str, str]:
 @app.get("/config-status")
 async def config_status() -> dict[str, Any]:
     """不洩漏金鑰，只回報是否已設定（方便本機檢查）。"""
-    from app.config import google_maps_api_key
+    from app.config import firebase_edges_collection, firebase_nodes_collection, firebase_project_id, google_maps_api_key
 
     return {
         "openai_configured": bool(openai_api_key()),
         "google_maps_configured": bool(google_maps_api_key()),
+        "firebase_route_configured": bool(firebase_project_id()),
+        "firebase_nodes_collection": firebase_nodes_collection(),
+        "firebase_edges_collection": firebase_edges_collection(),
         "yolo": yolo_status(),
         "video_ws": "wss://<your-host>/ws/video" if yolo_enabled() else None,
         "env_file_hint": "navigation-server/.env（可從 config.example.env 複製）",

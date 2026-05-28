@@ -11,6 +11,7 @@ from typing import Any, Optional
 from openai import OpenAI
 
 from app.config import (
+    firebase_project_id,
     google_maps_api_key,
     openai_api_key,
     openai_chat_model,
@@ -120,6 +121,7 @@ def handle_ai(payload: dict[str, Any]) -> dict[str, Any]:
 
     client = OpenAI(api_key=key)
     maps_ok = bool(google_maps_api_key())
+    safe_route_ok = bool(firebase_project_id())
 
     # 導航中：問剩餘時間／距離
     remaining_kw = [
@@ -139,11 +141,11 @@ def handle_ai(payload: dict[str, Any]) -> dict[str, Any]:
                 "reply": "無法取得你的位置（請在手機傳 origin=緯度,經度，或檢查伺服器網路以使用 IP 粗估）。",
                 "intent": "navigate",
             }
-        if maps_ok:
+        if safe_route_ok:
             summary = get_directions_summary(origin_str or f"{lat},{lng}", current_dest, mode="walking")
             return {"reply": summary, "intent": "navigate", "origin_used": origin_str or f"{lat},{lng}"}
         return {
-            "reply": "已記錄你的問題，但尚未設定 GOOGLE_MAPS_API_KEY，無法計算距離與時間。",
+            "reply": "尚未設定 Firebase 路網資料，無法計算安全路線。",
             "intent": "navigate",
         }
 
@@ -164,10 +166,10 @@ def handle_ai(payload: dict[str, Any]) -> dict[str, Any]:
             }
 
         lat, lng, origin_str = _resolve_origin(origin_phone)
-        if lat is None or not maps_ok:
+        if lat is None or not safe_route_ok:
             msg = (
-                "無法取得起點座標或尚未設定 Google Maps API。"
-                "請在 .env 設定 GOOGLE_MAPS_API_KEY，並讓手機在呼叫 /ai 時帶入 origin（「緯度,經度」）。"
+                "無法取得起點座標或尚未設定 Firebase 路網資料。"
+                "請在 .env 設定 FIREBASE_PROJECT_ID，並讓手機在呼叫 /ai 時帶入 origin（「緯度,經度」）。"
             )
             if key:
                 r2 = client.chat.completions.create(
