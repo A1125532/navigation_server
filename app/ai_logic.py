@@ -7,7 +7,12 @@ from __future__ import annotations
 
 import json
 import torch
+import cv2
+import numpy as np
+import time
 from typing import Any, Optional
+from openai import OpenAI
+from transformers import SegformerImageProcessor, SegformerForSemanticSegmentation
 
 from openai import OpenAI
 
@@ -245,153 +250,181 @@ def handle_ai(payload: dict[str, Any]) -> dict[str, Any]:
     return {"reply": reply, "intent": "chat"}
 
 
-_yolo_model = None
-_midas_model = None
-_midas_transform = None
-_yolo_load_error: str | None = None
-device = "cuda" if torch.cuda.is_available() else "cpu"
+
+SEG_INTERVAL = 5
+WALKABLE_IDS = [3, 7, 11, 12]  # ADE20K 道路、人行道、地面 ID
+
+VERY_CLOSE_DEPTH = 0.55  # 歸一化深度閥值（已針對室內外混合優化）
+CENTER_RATIO = 0.25      # 中央危險區域比例
+
+REQUIRED_PERSON_FRAMES = 5
+REQUIRED_DEV_FRAMES = 15  # 本地即時流稍微調敏銳一點
+
+DEV_OFFSET_THRESHOLD = 0.06  # 左右偏離門檻
 
 
-def _get_yolo_model():
-    global _yolo_model, _yolo_load_error
-    if _yolo_model is not None:
-        return _yolo_model
-    if _yolo_load_error is not None:
-        raise RuntimeError(_yolo_load_error)
-    try:
+class NavigationBrain:
+    """為了在持續的 WebSocket 圖片串流中記錄『連續幀數』，我們用一個 Class 來保持狀態"""
+    def __init__(self):
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
         from ultralytics import YOLO
+        
+        print(f"[{self.device}] 正在初始化三大視覺 AI 模型核心...")
+        self.yolo = YOLO(yolo_model_path())
+        self.midas = torch.hub.load("intel-isl/MiDaS", "MiDaS_small").to(self.device).eval()
+        self.midas_tf = torch.hub.load("intel-isl/MiDaS", "transforms").small_transform
+        
+        self.seg_processor = SegformerImageProcessor.from_pretrained("nvidia/segformer-b0-finetuned-ade-512-512")
+        self.seg_model = SegformerForSemanticSegmentation.from_pretrained("nvidia/segformer-b0-finetuned-ade-512-512").to(self.device).eval()
+        
+        self.frame_id = 0
+        self.walkable_mask = None
+        self.dev_counter = 0
+        self.person_counter = 0
+        self.current_dev_dir = None
 
-        _yolo_model = YOLO(yolo_model_path())
-        return _yolo_model
-    except Exception as e:  # noqa: BLE001
-        _yolo_load_error = str(e)
-        raise
+    def process_frame(self, frame: np.ndarray) -> tuple[list[dict], Optional[str]]:
+        self.frame_id += 1
+        h, w = frame.shape[:2]
+        img_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        
+        # 1. 深度計算
+        depth_input = self.midas_tf(img_rgb).to(self.device)
+        with torch.no_grad():
+            depth = self.midas(depth_input)
+            depth = torch.nn.functional.interpolate(
+                depth.unsqueeze(1), size=(h, w), mode="bicubic", align_corners=False
+            ).squeeze()
+        depth_np = depth.cpu().numpy()
+        depth_norm = cv2.normalize(depth_np, None, 0, 1, cv2.NORM_MINMAX)
 
-def _get_midas_model():
-    """動態載入 MiDaS 深度模型"""
-    global _midas_model, _midas_transform
-    if _midas_model is None:
-        _midas_model = torch.hub.load("intel-isl/MiDaS", "MiDaS_small")
-        _midas_model.to(device).eval()
-        _midas_transform = torch.hub.load("intel-isl/MiDaS", "transforms").small_transform
-    return _midas_model, _midas_transform
+        # 2. 地面分割
+        if self.frame_id % SEG_INTERVAL == 0 or self.walkable_mask is None:
+            inputs = self.seg_processor(images=img_rgb, return_tensors="pt").to(self.device)
+            with torch.no_grad():
+                outputs = self.seg_model(**inputs)
+            seg = torch.argmax(outputs.logits, dim=1)[0].cpu().numpy()
+            mask_bool = np.isin(seg, WALKABLE_IDS)
+            self.walkable_mask = cv2.resize(
+                mask_bool.astype(np.uint8), (w, h), interpolation=cv2.INTER_NEAREST
+            ).astype(bool)
+
+        # 3. 走歪偏離計算
+        y1, y2 = int(h * 0.6), h
+        roi = self.walkable_mask[y1:y2, :]
+        ys, xs = np.where(roi)
+        
+        if len(xs) > 0:
+            walk_center_x = xs.mean()
+            offset = (walk_center_x - (w / 2)) / w
+            if abs(offset) <= DEV_OFFSET_THRESHOLD:
+                self.current_dev_dir = None
+                self.dev_counter = max(0, self.dev_counter - 1)
+            else:
+                self.dev_counter += 1
+                self.current_dev_dir = "left" if offset > 0 else "right"
+        else:
+            self.dev_counter = 0
+            self.current_dev_dir = None
+
+        # 4. YOLO 偵測
+        results = self.yolo(frame, conf=0.4, verbose=False)[0]
+        person_near = False
+        detections = []
+
+        for box in results.boxes:
+            x1b, y1b, x2b, y2b = map(int, box.xyxy[0])
+            cls_id = int(box.cls[0])
+            label = self.yolo.names[cls_id]
+
+            cx = int(np.clip((x1b + x2b) // 2, 0, w - 1))
+            cy = int(np.clip((y1b + y2b) // 2, 0, h - 1))
+            d = depth_norm[cy, cx]
+            est_dist = float(1.0 / (d + 1e-6))
+
+            detections.append({
+                "label": label, "confidence": float(box.conf[0]), "distance": round(est_dist, 2),
+                "x1": x1b, "y1": y1b, "x2": x2b, "y2": y2b
+            })
+
+            if label == "person" and d > VERY_CLOSE_DEPTH:
+                if abs(cx - w // 2) < w * CENTER_RATIO and cy > h * 0.5:
+                    person_near = True
+
+        # 5. 語音指令仲裁
+        voice_cmd = None
+        if person_near:
+            self.person_counter += 1
+        else:
+            self.person_counter = max(0, self.person_counter - 1)
+
+        if self.person_counter >= REQUIRED_PERSON_FRAMES:
+            voice_cmd = "speak_person_near"
+            self.person_counter = 0
+        elif self.dev_counter >= REQUIRED_DEV_FRAMES:
+            if self.current_dev_dir == "left":
+                voice_cmd = "speak_lean_left"
+            elif self.current_dev_dir == "right":
+                voice_cmd = "speak_lean_right"
+            self.dev_counter = 0
+
+        return detections, voice_cmd
+
+
+# =======================================================
+# 3. 伺服器入口對接介面（熱載入與單例啟動）
+# =======================================================
+
+_brain_instance: NavigationBrain | None = None
+_yolo_load_error: str | None = None
+
 
 def warmup_yolo_model() -> dict[str, Any]:
-    """啟動時預載模型（雲端部署建議在 lifespan 呼叫）。"""
+    """預載三大核心模型"""
+    global _brain_instance, _yolo_load_error
     if not yolo_enabled():
         return {"enabled": False, "loaded": False}
     try:
-        _get_yolo_model()
-        return {"enabled": True, "loaded": True, "model": yolo_model_path()}
-    except Exception as e:  # noqa: BLE001
-        return {"enabled": True, "loaded": False, "error": str(e), "model": yolo_model_path()}
+        if _brain_instance is None:
+            _brain_instance = NavigationBrain()
+        return {"enabled": True, "loaded": True, "device": _brain_instance.device}
+    except Exception as e:
+        _yolo_load_error = str(e)
+        return {"enabled": True, "loaded": False, "error": str(e)}
 
 
 def yolo_status() -> dict[str, Any]:
+    global _brain_instance
     if not yolo_enabled():
         return {"enabled": False, "loaded": False}
     return {
         "enabled": True,
-        "loaded": _yolo_model is not None,
-        "model": yolo_model_path(),
+        "loaded": _brain_instance is not None,
         "error": _yolo_load_error,
     }
 
 
 def run_yolo_inference(image_bytes: bytes) -> dict[str, Any]:
-    """將 JPEG 位元組解碼後執行 YOLOv8n，回傳包含偵測框與語音指令的字典。"""
-    # 確保不管發生什麼事，最少都會回傳預設值，不會引發 NameError
-    default_reply = {"objects": [], "voice_cmd": None}
-    
+    """眼鏡每秒送好幾張圖進來的地方，這裡會調用我們創建好的狀態大腦"""
+    global _brain_instance
     if not yolo_enabled():
-        return default_reply
-
-    import cv2
-    import numpy as np
+        return {"objects": [], "voice_cmd": None}
+        
+    if _brain_instance is None:
+        _brain_instance = NavigationBrain()
 
     nparr = np.frombuffer(image_bytes, np.uint8)
     frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
     if frame is None:
-        return default_reply
+        return {"objects": [], "voice_cmd": None}
 
-    # 縮小影像以加快雲端 CPU 推理，降低 WebSocket 逾時斷線
+    # 縮小畫面確保區網傳輸不卡頓 (480x...)
     h, w = frame.shape[:2]
-    max_side = 640
+    max_side = 480
     if max(h, w) > max_side:
         scale = max_side / float(max(h, w))
-        frame = cv2.resize(
-            frame,
-            (max(1, int(w * scale)), max(1, int(h * scale))),
-            interpolation=cv2.INTER_AREA,
-        )
-        h, w = frame.shape[:2]
-    
-    img_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        frame = cv2.resize(frame, (max(1, int(w * scale)), max(1, int(h * scale))), interpolation=cv2.INTER_AREA)
 
-    midas_model, midas_transform = _get_midas_model()
-    depth_input = midas_transform(img_rgb).to(device)
-    with torch.no_grad():
-        depth = midas_model(depth_input)
-        depth = torch.nn.functional.interpolate(
-            depth.unsqueeze(1),
-            size=(h, w),
-            mode="bicubic",
-            align_corners=False
-        ).squeeze()
-        
-    depth_np = depth.cpu().numpy()
-    depth_norm = cv2.normalize(depth_np, None, 0, 1, cv2.NORM_MINMAX)
-
-    model = _get_yolo_model()
-    results = model(frame, verbose=False, imgsz=320)
-    
-    detections: list[dict[str, Any]] = []
-    voice_cmd = None  # ★ 關鍵：先初始化為 None，避免 NameError 崩潰
-    VERY_CLOSE_DEPTH = 0.55  # 歸一化深度閥值 (愈大愈近)
-    
-
-    for r in results:
-        for box in r.boxes:
-            x1, y1, x2, y2 = box.xyxy[0].tolist()
-            conf = float(box.conf[0])
-            cls = int(box.cls[0])
-            label = model.names[cls]
-
-            cx = int(np.clip((x1 + x2) // 2, 0, w - 1))
-            cy = int(np.clip((y1 + y2) // 2, 0, h - 1))
-            d = depth_norm[cy, cx]
-            est_dist = float(1.0 / (d + 1e-6))  # 估計相對距離數值
-            
-            # 當偵測到特定物體且信心度高於 40% 時，觸發語音命令
-            if conf >= 0.4 and voice_cmd is None:
-                if d > VERY_CLOSE_DEPTH:
-                    if label == "person":
-                        voice_cmd = "speak_person_near"
-                    elif label == "laptop":
-                        voice_cmd = "speak_laptop_near"
-                    elif label == "cup":
-                        voice_cmd = "speak_cup_near"
-                else:
-                    if label == "person":
-                        voice_cmd = "speak_person"
-                    elif label == "laptop":
-                        voice_cmd = "speak_laptop"
-                    elif label == "cup":
-                        voice_cmd = "speak_cup"
-                    
-            detections.append(
-                {
-                    "label": label,
-                    "confidence": conf,
-                    "distance": round(est_dist, 2),
-                    "x1": x1,
-                    "y1": y1,
-                    "x2": x2,
-                    "y2": y2,
-                }
-            )
-            
-    return {
-        "objects": detections,
-        "voice_cmd": voice_cmd
-    }
+    # 丟進大腦算計數器，拿到這幀的結論
+    objects, voice_cmd = _brain_instance.process_frame(frame)
+    return {"objects": objects, "voice_cmd": voice_cmd}
