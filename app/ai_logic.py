@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import torch
 from typing import Any, Optional
 
 from openai import OpenAI
@@ -245,7 +246,10 @@ def handle_ai(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 _yolo_model = None
+_midas_model = None
+_midas_transform = None
 _yolo_load_error: str | None = None
+device = "cuda" if torch.cuda.is_available() else "cpu"
 
 
 def _get_yolo_model():
@@ -263,6 +267,14 @@ def _get_yolo_model():
         _yolo_load_error = str(e)
         raise
 
+def _get_midas_model():
+    """動態載入 MiDaS 深度模型"""
+    global _midas_model, _midas_transform
+    if _midas_model is None:
+        _midas_model = torch.hub.load("intel-isl/MiDaS", "MiDaS_small")
+        _midas_model.to(device).eval()
+        _midas_transform = torch.hub.load("intel-isl/MiDaS", "transforms").small_transform
+    return _midas_model, _midas_transform
 
 def warmup_yolo_model() -> dict[str, Any]:
     """啟動時預載模型（雲端部署建議在 lifespan 呼叫）。"""
@@ -304,7 +316,7 @@ def run_yolo_inference(image_bytes: bytes) -> dict[str, Any]:
 
     # 縮小影像以加快雲端 CPU 推理，降低 WebSocket 逾時斷線
     h, w = frame.shape[:2]
-    max_side = 480
+    max_side = 640
     if max(h, w) > max_side:
         scale = max_side / float(max(h, w))
         frame = cv2.resize(
@@ -312,12 +324,31 @@ def run_yolo_inference(image_bytes: bytes) -> dict[str, Any]:
             (max(1, int(w * scale)), max(1, int(h * scale))),
             interpolation=cv2.INTER_AREA,
         )
+        h, w = frame.shape[:2]
+    
+    img_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+
+    midas_model, midas_transform = _get_midas_model()
+    depth_input = midas_transform(img_rgb).to(device)
+    with torch.no_grad():
+        depth = midas_model(depth_input)
+        depth = torch.nn.functional.interpolate(
+            depth.unsqueeze(1),
+            size=(h, w),
+            mode="bicubic",
+            align_corners=False
+        ).squeeze()
+        
+    depth_np = depth.cpu().numpy()
+    depth_norm = cv2.normalize(depth_np, None, 0, 1, cv2.NORM_MINMAX)
 
     model = _get_yolo_model()
     results = model(frame, verbose=False, imgsz=320)
     
     detections: list[dict[str, Any]] = []
     voice_cmd = None  # ★ 關鍵：先初始化為 None，避免 NameError 崩潰
+    VERY_CLOSE_DEPTH = 0.55  # 歸一化深度閥值 (愈大愈近)
+    
 
     for r in results:
         for box in r.boxes:
@@ -325,20 +356,34 @@ def run_yolo_inference(image_bytes: bytes) -> dict[str, Any]:
             conf = float(box.conf[0])
             cls = int(box.cls[0])
             label = model.names[cls]
+
+            cx = int(np.clip((x1 + x2) // 2, 0, w - 1))
+            cy = int(np.clip((y1 + y2) // 2, 0, h - 1))
+            d = depth_norm[cy, cx]
+            est_dist = float(1.0 / (d + 1e-6))  # 估計相對距離數值
             
             # 當偵測到特定物體且信心度高於 40% 時，觸發語音命令
-            if conf >= 0.4:
-                if label == "person":
-                    voice_cmd = "speak_person"
-                elif label == "laptop":
-                    voice_cmd = "speak_laptop"
-                elif label == "cup":
-                    voice_cmd = "speak_cup"
+            if conf >= 0.4 and voice_cmd is None:
+                if d > VERY_CLOSE_DEPTH:
+                    if label == "person":
+                        voice_cmd = "speak_person_near"
+                    elif label == "laptop":
+                        voice_cmd = "speak_laptop_near"
+                    elif label == "cup":
+                        voice_cmd = "speak_cup_near"
+                else:
+                    if label == "person":
+                        voice_cmd = "speak_person"
+                    elif label == "laptop":
+                        voice_cmd = "speak_laptop"
+                    elif label == "cup":
+                        voice_cmd = "speak_cup"
                     
             detections.append(
                 {
                     "label": label,
                     "confidence": conf,
+                    "distance": round(est_dist, 2),
                     "x1": x1,
                     "y1": y1,
                     "x2": x2,
