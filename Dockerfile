@@ -15,6 +15,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 RUN python -c "from ultralytics import YOLO; YOLO('yolov8n.pt')"
 
 COPY app ./app
+COPY data ./data
 
 ENV PORT=8765
 ENV YOLO_ENABLED=true
