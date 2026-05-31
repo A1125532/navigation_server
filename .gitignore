@@ -6,3 +6,4 @@ __pycache__/
 config.env
 *.wav
 *.m4a
+yolov8n.pt

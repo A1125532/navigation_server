@@ -23,6 +23,7 @@ import app.config  # noqa: F401 — 載入 .env
 from app.ai_logic import handle_ai, run_yolo_inference, warmup_yolo_model, yolo_status
 from app.config import openai_api_key, yolo_enabled
 from app.transcribe_sanity import is_unreliable_transcription
+from app.stair_api import router as stair_router
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +38,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Navigation Pi Backend", version="0.3.0", lifespan=lifespan)
+app.include_router(stair_router)
 
 app.add_middleware(
     CORSMiddleware,
@@ -60,6 +62,7 @@ async def root() -> dict[str, Any]:
             "transcribe": "POST /transcribe",
             "ai": "POST /ai",
             "video_ws": "WS /ws/video",
+            "stair": "POST /detect/stair",
         },
     }
 
